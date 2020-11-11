@@ -1,34 +1,35 @@
-import numpy as np
+#import numpy as np
+import jax.numpy as jnp
 import pyqmc.eval_ecp as eval_ecp
 from pyqmc.distance import RawDistance
 
 
 def ee_energy(configs):
-    ne = configs.configs.shape[1]
+    ne = configs.shape[1]
     if ne == 1:
-        return np.zeros(configs.configs.shape[0])
-    ee = np.zeros(configs.configs.shape[0])
-    ee, ij = configs.dist.dist_matrix(configs.configs)
-    ee = np.linalg.norm(ee, axis=2)
-    return np.sum(1.0 / ee, axis=1)
+        return jnp.zeros(configs.shape[0])
+    ee = jnp.zeros(configs.shape[0])
+    ee, ij = RawDistance().dist_matrix(configs)
+    ee = jnp.linalg.norm(ee, axis=2)
+    return jnp.sum(1.0 / ee, axis=1)
 
 
 def ei_energy(mol, configs):
     ei = 0.0
     for c, coord in zip(mol.atom_charges(), mol.atom_coords()):
-        delta = configs.configs - coord[np.newaxis, np.newaxis, :]
-        deltar = np.sqrt(np.sum(delta ** 2, axis=2))
-        ei += -c * np.sum(1.0 / deltar, axis=1)
+        delta = configs - coord[jnp.newaxis, jnp.newaxis, :]
+        deltar = jnp.sqrt(jnp.sum(delta ** 2, axis=2))
+        ei += -c * jnp.sum(1.0 / deltar, axis=1)
     return ei
 
 
 def ii_energy(mol):
     ei = 0.0
     d = RawDistance()
-    rij, ij = d.dist_matrix(mol.atom_coords()[np.newaxis, :, :])
+    rij, ij = d.dist_matrix(mol.atom_coords()[jnp.newaxis, :, :])
     if len(ij) == 0:
-        return np.array([0.0])
-    rij = np.linalg.norm(rij, axis=2)[0, :]
+        return jnp.array([0.0])
+    rij = jnp.linalg.norm(rij, axis=2)[0, :]
     iitot = 0
     c = mol.atom_charges()
     for (i, j), r in zip(ij, rij):
@@ -41,10 +42,10 @@ def get_ecp(mol, configs, wf, threshold):
 
 
 def kinetic(configs, wf):
-    nconf, nelec, ndim = configs.configs.shape
-    ke = np.zeros(nconf)
+    nconf, nelec, ndim = configs.shape
+    ke = jnp.zeros(nconf)
     for e in range(nelec):
-        ke += -0.5 * np.real(wf.laplacian(e, configs.electron(e)))
+        ke += -0.5 * jnp.real(wf["laplacian"](configs, e, configs[:, e]))
     return ke
 
 

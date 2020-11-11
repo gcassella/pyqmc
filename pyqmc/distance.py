@@ -1,5 +1,5 @@
 import numpy as np
-
+import jax.numpy as jnp
 
 class RawDistance:
     """ Compute distance vectors using open boundary conditions"""
@@ -13,9 +13,9 @@ class RawDistance:
         configs will most likely be [nconfig,electron,dimension], and vec will be [nconfig,dimension]
         """
         if len(vec.shape) == 3:
-            v = vec.transpose((1, 0, 2))[:, :, np.newaxis]
+            v = vec.transpose((1, 0, 2))[:, :, jnp.newaxis]
         else:
-            v = vec[:, np.newaxis, :]
+            v = vec[:, jnp.newaxis, :]
         return v - configs
 
     def dist_matrix(self, configs):
@@ -31,14 +31,14 @@ class RawDistance:
         n = configs.shape[1]
         npairs = int(n * (n - 1) / 2)
         if npairs == 0:
-            return np.zeros((n, 0, 3)), []
+            return jnp.zeros((n, 0, 3)), []
 
         vs = []
         ij = []
         for i in range(n):
             vs.append(self.dist_i(configs[:, i + 1 :, :], configs[:, i, :]))
             ij.extend([(i, j) for j in range(i + 1, n)])
-        vs = np.concatenate(vs, axis=1)
+        vs = jnp.concatenate(vs, axis=1)
 
         return vs, ij
 
@@ -55,13 +55,13 @@ class RawDistance:
         n1 = config1.shape[1]
         n2 = config2.shape[1]
         if n1 == 0 or n2 == 0:
-            return np.zeros((config1.shape[0], 0, 3)), []
+            return jnp.zeros((config1.shape[0], 0, 3)), []
         vs = []
         ij = []
         for i in range(n2):
             vs.append(self.dist_i(config1, config2[:, i, :]))
             ij.extend([(i, j) for j in range(n1)])
-        vs = np.concatenate(vs, axis=1)
+        vs = jnp.concatenate(vs, axis=1)
 
         return vs, ij
 

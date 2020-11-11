@@ -1,7 +1,9 @@
-import numpy as np
 from pyqmc.distance import MinimalImageDistance, RawDistance
 from pyqmc.pbc import enforce_pbc
 import copy
+
+import jax
+import jax.numpy as jnp
 
 
 class OpenConfigs:
@@ -32,7 +34,11 @@ class OpenConfigs:
           new: OpenConfigs with (nconfig, 3) new coordinates
           accept: (nconfig,) boolean for which configs to update
         """
-        self.configs[accept, e, :] = new.configs[accept, :]
+        self.configs = jax.ops.index_update(
+            self.configs,
+            jax.ops.index[accept, e, :],
+            new.configs[accept, :]
+        )
 
     def move_all(self, new, accept):
         """
@@ -41,6 +47,11 @@ class OpenConfigs:
           new: OpenConfigs with configs.shape new coordinates
           accept: (nconfig,) boolean for which configs to update
         """
+        self.configs = jax.ops.index_update(
+            self.configs,
+            accept,
+            new.configs[accept]
+        )
         self.configs[accept] = new.configs[accept]
 
     def resample(self, newinds):
@@ -59,7 +70,7 @@ class OpenConfigs:
         Returns:
           configslist: list of new configs objects
         """
-        return [OpenConfigs(c) for c in np.array_split(self.configs, npartitions)]
+        return [OpenConfigs(c) for c in jnp.array_split(self.configs, npartitions)]
 
     def join(self, configslist):
         """
@@ -67,7 +78,7 @@ class OpenConfigs:
         Args:
           configslist: list of OpenConfigs objects; total number of configs must match
         """
-        self.configs[:] = np.concatenate([c.configs for c in configslist], axis=0)[:]
+        self.configs = jnp.concatenate([c.configs for c in configslist], axis=0)
 
     def copy(self):
         return copy.deepcopy(self)
@@ -89,7 +100,7 @@ class OpenConfigs:
 
     def load_hdf(self, hdf):
         """Note that the number of configurations will change to reflect the number in the hdf file."""
-        self.configs = np.array(hdf["configs"])
+        self.configs = jnp.array(hdf["configs"])
 
 
 class PeriodicConfigs:

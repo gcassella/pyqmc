@@ -1,9 +1,13 @@
 import os
-import numpy as np
+#import numpy as np
 import pyqmc.mc as mc
 import sys
 import h5py
 
+import jax
+import jax.numpy as jnp
+
+from functools import partial
 
 def limdrift(g, tau, acyrus=0.25):
     """
@@ -19,11 +23,15 @@ def limdrift(g, tau, acyrus=0.25):
     Returns: 
       The vector with the cut off applied and multiplied by tau.
     """
-    tot = np.linalg.norm(g, axis=1) * acyrus
+    tot = jnp.linalg.norm(g, axis=1) * acyrus
     mask = tot > 1e-8
-    taueff = np.ones(tot.shape) * tau
-    taueff[mask] = (np.sqrt(1 + 2 * tau * tot[mask]) - 1) / tot[mask]
-    return g * taueff[:, np.newaxis]
+    taueff = jnp.ones(tot.shape) * tau
+    taueff = jnp.where(
+      mask, 
+      (jnp.sqrt(1 + 2 * tau * tot) - 1) / tot,
+      taueff
+    )
+    return g * taueff[:, jnp.newaxis]
 
 
 def limdrift_cutoff(g, tau, cutoff=1):
@@ -40,8 +48,85 @@ def limdrift_cutoff(g, tau, cutoff=1):
     """
     return mc.limdrift(g, cutoff) * tau
 
+@partial(jax.jit, static_argnums=(1,9,10,11))
+def dmc_step(
+    key,
+    wf,
+    configs,
+    df,
+    weights,
+    tstep,
+    branchcut_start,
+    branchcut_stop,
+    eref,
+    accumulators,
+    ekey,
+    drift_limiter,
+):
+    nconfig, nelec = configs.shape[0:2]
+    #wf.recompute(configs)
+
+    eloc = accumulators[ekey[0]](configs, wf)[ekey[1]].real
+    acc = jnp.zeros(nelec)
+    for e in range(nelec):
+        # Propose move
+        grad = drift_limiter(jnp.real(wf["gradient"](configs, e, configs[:, e]).T), tstep)
+        key, subkey = jax.random.split(key)
+        gauss = jax.random.normal(subkey, (nconfig, 3))*jnp.sqrt(tstep)
+        newepos = configs[:, e, :] + gauss + grad
+        #newepos = configs.make_irreducible(e, eposnew)
+        # Compute reverse move
+        new_grad = drift_limiter(jnp.real(wf["gradient"](configs, e, newepos).T), tstep)
+        forward = jnp.sum(gauss ** 2, axis=1)
+        backward = jnp.sum((gauss + grad + new_grad) ** 2, axis=1)
+        # forward = np.sum((configs[:, e, :] + grad - eposnew) ** 2, axis=1)
+        # backward = np.sum((eposnew + new_grad - configs[:, e, :]) ** 2, axis=1)
+        t_prob = jnp.exp(1 / (2 * tstep) * (forward - backward))
+        # Acceptance -- fixed-node: reject if wf changes sign
+        wfratio = wf["testvalue"](configs, e, newepos)
+        ratio = jnp.abs(wfratio) ** 2 * t_prob
+        if not wf["iscomplex"]:
+            ratio *= jnp.sign(wfratio)
+        key, subkey = jax.random.split(key)
+        accept = ratio > jax.random.uniform(subkey, (nconfig,))
+        # Update wave function
+        proposed = jax.ops.index_update(
+            configs,
+            jax.ops.index[:, e, :],
+            newepos
+        )
+        configs = jnp.where(accept[:, jnp.newaxis, jnp.newaxis], proposed, configs)
+        #wf.updateinternals(e, newepos, mask=accept)
+        acc = jax.ops.index_update(
+            acc,
+            e,
+            jnp.mean(accept)
+        )
+    # weights
+    energydat = accumulators[ekey[0]](configs, wf)
+    elocnew = energydat[ekey[1]].real
+    tdamp = limit_timestep(
+        weights, elocnew, eloc, eref, branchcut_start, branchcut_stop
+    )
+    wmult = jnp.exp(-tstep * 0.5 * tdamp * (eloc + elocnew - 2 * eref))
+    wmult = jnp.where(wmult > 2.0, 2.0, wmult)
+    weights *= wmult
+    wavg = jnp.mean(weights)
+    avg = {}
+    for k, accumulator in accumulators.items():
+        dat = accumulator(configs, wf) if k != ekey[0] else energydat
+        for m, res in dat.items():
+            avg[k + m] = jnp.einsum("...i,i...->...", weights, res) / (
+                nconfig * wavg
+            )
+    avg["weight"] = wavg
+    avg["acceptance"] = jnp.mean(acc)
+    df.append(avg)
+
+    return df, configs
 
 def dmc_propagate(
+    key,
     wf,
     configs,
     weights,
@@ -84,98 +169,32 @@ def dmc_propagate(
       
     """
     assert accumulators is not None, "Need an energy accumulator for DMC"
-    nconfig, nelec = configs.configs.shape[0:2]
-    wf.recompute(configs)
-
-    eloc = accumulators[ekey[0]](configs, wf)[ekey[1]].real
     df = []
     for _ in range(nsteps):
-        acc = np.zeros(nelec)
-        for e in range(nelec):
-            # Propose move
-            grad = drift_limiter(np.real(wf.gradient(e, configs.electron(e)).T), tstep)
-            gauss = np.random.normal(scale=np.sqrt(tstep), size=(nconfig, 3))
-            eposnew = configs.configs[:, e, :] + gauss + grad
-            newepos = configs.make_irreducible(e, eposnew)
-
-            # Compute reverse move
-            new_grad = drift_limiter(np.real(wf.gradient(e, newepos).T), tstep)
-            forward = np.sum(gauss ** 2, axis=1)
-            backward = np.sum((gauss + grad + new_grad) ** 2, axis=1)
-            # forward = np.sum((configs[:, e, :] + grad - eposnew) ** 2, axis=1)
-            # backward = np.sum((eposnew + new_grad - configs[:, e, :]) ** 2, axis=1)
-            t_prob = np.exp(1 / (2 * tstep) * (forward - backward))
-
-            # Acceptance -- fixed-node: reject if wf changes sign
-            wfratio = wf.testvalue(e, newepos)
-            ratio = np.abs(wfratio) ** 2 * t_prob
-            if not wf.iscomplex:
-                ratio *= np.sign(wfratio)
-            accept = ratio > np.random.rand(nconfig)
-
-            # Update wave function
-            configs.move(e, newepos, accept)
-            wf.updateinternals(e, newepos, mask=accept)
-            acc[e] = np.mean(accept)
-
-        # weights
-        elocold = eloc.copy()
-        energydat = accumulators[ekey[0]](configs, wf)
-        eloc = energydat[ekey[1]].real
-        tdamp = limit_timestep(
-            weights, eloc, elocold, eref, branchcut_start, branchcut_stop
+        key, subkey = jax.random.split(key)
+        df, configs = dmc_step(
+            subkey,
+            wf,
+            configs,
+            df,
+            weights,
+            tstep,
+            branchcut_start,
+            branchcut_stop,
+            eref,
+            accumulators,
+            ekey,
+            drift_limiter,
         )
-        wmult = np.exp(-tstep * 0.5 * tdamp * (elocold + eloc - 2 * eref))
-        wmult[wmult > 2.0] = 2.0
-        weights *= wmult
-        wavg = np.mean(weights)
 
-        avg = {}
-        for k, accumulator in accumulators.items():
-            dat = accumulator(configs, wf) if k != ekey[0] else energydat
-            for m, res in dat.items():
-                avg[k + m] = np.einsum("...i,i...->...", weights, res) / (
-                    nconfig * wavg
-                )
-        avg["weight"] = wavg
-        avg["acceptance"] = np.mean(acc)
-        df.append(avg)
     df_ret = {}
-    weight = np.asarray([d["weight"] for d in df])
-    avg_weight = weight / np.mean(weight)
+    weight = jnp.asarray([d["weight"] for d in df])
+    avg_weight = weight / jnp.mean(weight)
     for k in df[0].keys():
-        df_ret[k] = np.mean([d[k] * w for d, w in zip(df, avg_weight)], axis=0)
-    df_ret["weight"] = np.mean(weight)
+        df_ret[k] = jnp.mean(jnp.array([d[k] * w for d, w in zip(df, avg_weight)]), axis=0)
+    df_ret["weight"] = jnp.mean(weight)
 
     return df_ret, configs, weights
-
-
-def dmc_propagate_parallel(wf, configs, weights, client, npartitions, *args, **kwargs):
-    config = configs.split(npartitions)
-    weight = np.split(weights, npartitions)
-    runs = [
-        client.submit(dmc_propagate, wf, conf, wt, *args, **kwargs)
-        for conf, wt in zip(config, weight)
-    ]
-    allresults = list(zip(*[r.result() for r in runs]))
-    configs.join(allresults[1])
-    weights = np.concatenate(allresults[2])
-    confweight = np.array([len(c.configs) for c in config], dtype=float)
-    confweight_avg = confweight / (np.mean(confweight) * npartitions)
-    weight = np.array([w["weight"] for w in allresults[0]])
-    weight_avg = weight / np.mean(weight)
-    block_avg = {}
-    for k in allresults[0][0].keys():
-        block_avg[k] = np.sum(
-            [
-                res[k] * ww * cw
-                for res, cw, ww in zip(allresults[0], confweight_avg, weight_avg)
-            ],
-            axis=0,
-        )
-    block_avg["weight"] = np.mean(weight)
-    return block_avg, configs, weights
-
 
 def limit_timestep(weights, elocnew, elocold, eref, start, stop):
     """
@@ -202,19 +221,20 @@ def limit_timestep(weights, elocnew, elocold, eref, start, stop):
             0 if eref-eloc > branchcut_stop*sigma,  
             decreases linearly inbetween.
     """
-    if start is None or stop is None:
-        return 1
-    assert (
-        stop > start
-    ), "stabilize weights requires stop>start. Invalid stop={0}, start={1}".format(
-        stop, start
-    )
-    eloc = np.stack([elocnew, elocold])
-    fbet = np.amax(eref - eloc, axis=0)
-    return np.clip((1 - (fbet - start)) / (stop - start), 0, 1)
+    # JAX does not like this kind of stuff!
+    #if start is None or stop is None:
+    #    return 1
+    #assert (
+    #    stop > start
+    #), "stabilize weights requires stop>start. Invalid stop={0}, start={1}".format(
+    #    stop, start
+    #)
+    eloc = jnp.stack([elocnew, elocold])
+    fbet = jnp.amax(eref - eloc, axis=0)
+    return jnp.clip((1 - (fbet - start)) / (stop - start), 0, 1)
 
 
-def branch(configs, weights):
+def branch(key, configs, weights):
     """
     Perform branching on a set of walkers  by stochastic reconfiguration
 
@@ -230,15 +250,15 @@ def branch(configs, weights):
 
       weights: (nconfig,) all weights are equal to average weight
     """
-    nconfig = configs.configs.shape[0]
-    wtot = np.sum(weights)
-    probability = np.cumsum(weights / wtot)
-    base = np.random.rand()
-    newinds = np.searchsorted(probability, (base + np.arange(nconfig) / nconfig) % 1.0)
-    configs.resample(newinds)
-    weights.fill(wtot / nconfig)
+    nconfig = configs.shape[0]
+    wtot = jnp.sum(weights)
+    probability = jnp.cumsum(weights / wtot)
+    key, subkey = jax.random.split(key)
+    base = jax.random.uniform(subkey)
+    newinds = jnp.searchsorted(probability, (base + jnp.arange(nconfig) / nconfig) % 1.0)
+    configs = configs[newinds]
+    weights = jnp.ones((nconfig, ))*wtot/nconfig
     return configs, weights
-
 
 def dmc_file(hdf_file, data, attr, configs, weights):
     import pyqmc.hdftools as hdftools
@@ -247,15 +267,22 @@ def dmc_file(hdf_file, data, attr, configs, weights):
         with h5py.File(hdf_file, "a") as hdf:
             if "configs" not in hdf.keys():
                 hdftools.setup_hdf(hdf, data, attr)
-                configs.initialize_hdf(hdf)
+                hdf.create_dataset(
+                  "configs",
+                  configs.shape,
+                  chunks=True,
+                  maxshape=(None, *configs.shape[1:]),
+                )
             if "weights" not in hdf.keys():
                 hdf.create_dataset("weights", weights.shape)
             hdftools.append_hdf(hdf, data)
-            configs.to_hdf(hdf)
+            hdf["configs"].resize(configs.shape)
+            hdf["configs"][...] = configs
             hdf["weights"][:] = weights
 
 
 def rundmc(
+    key,
     wf,
     configs,
     weights=None,
@@ -315,14 +342,16 @@ def rundmc(
         with h5py.File(hdf_file, "r") as hdf:
             stepoffset = hdf["step"][-1] + 1
             configs.load_hdf(hdf)
-            weights = np.array(hdf["weights"])
+            weights = jnp.array(hdf["weights"])
             eref = hdf["eref"][-1]
             esigma = hdf["esigma"][-1]
             if verbose:
                 print("Restarted calculation")
     else:
         warmup = 2
+        key, subkey = jax.random.split(key)
         df, configs = mc.vmc(
+            subkey,
             wf,
             configs,
             accumulators=accumulators,
@@ -331,63 +360,48 @@ def rundmc(
             verbose=verbose,
         )
         en = df[ekey[0] + ekey[1]][warmup:]
-        eref = np.mean(en).real
-        esigma = np.sqrt(np.var(en) * np.mean(df["nconfig"]))
+        eref = jnp.mean(en).real
+        esigma = jnp.sqrt(jnp.var(en) * jnp.mean(df["nconfig"]))
         if verbose:
             print("eref start", eref, "esigma", esigma)
 
-    nconfig = configs.configs.shape[0]
+    nconfig = configs.shape[0]
     if weights is None:
-        weights = np.ones(nconfig)
+        weights = jnp.ones(nconfig)
 
-    npropagate = int(np.ceil(nsteps / branchtime))
+    npropagate = int(jnp.ceil(nsteps / branchtime))
     df = []
     for step in range(npropagate):
-        if client is None:
-            df_, configs, weights = dmc_propagate(
-                wf,
-                configs,
-                weights,
-                tstep,
-                branchcut_start * esigma,
-                branchcut_stop * esigma,
-                eref=eref,
-                nsteps=branchtime,
-                accumulators=accumulators,
-                ekey=ekey,
-                drift_limiter=drift_limiter,
-                **kwargs,
-            )
-        else:
-            df_, configs, weights = dmc_propagate_parallel(
-                wf,
-                configs,
-                weights,
-                client,
-                npartitions,
-                tstep,
-                branchcut_start * esigma,
-                branchcut_stop * esigma,
-                eref=eref,
-                nsteps=branchtime,
-                accumulators=accumulators,
-                ekey=ekey,
-                drift_limiter=drift_limiter,
-                **kwargs,
-            )
+        key, subkey = jax.random.split(key)
+        df_, configs, weights = dmc_propagate(
+            subkey,
+            wf,
+            configs,
+            weights,
+            tstep,
+            branchcut_start * esigma,
+            branchcut_stop * esigma,
+            eref=eref,
+            nsteps=branchtime,
+            accumulators=accumulators,
+            ekey=ekey,
+            drift_limiter=drift_limiter,
+            **kwargs,
+        )
 
         df_["eref"] = eref
         df_["step"] = step + stepoffset
         df_["esigma"] = esigma
         df_["tstep"] = tstep
-        df_["weight_std"] = np.std(weights)
+        df_["weight_std"] = jnp.std(weights)
         df_["nsteps"] = branchtime
 
         dmc_file(hdf_file, df_, {}, configs, weights)
         # print(df_)
         df.append(df_)
-        eref = df_[ekey[0] + ekey[1]] - feedback * np.log(np.mean(weights))
-        configs, weights = branch(configs, weights)
+        eref = df_[ekey[0] + ekey[1]] - feedback * jnp.log(jnp.mean(weights))
+        key, subkey = jax.random.split(key)
+        configs, weights = branch(subkey, configs, weights)
         if verbose:
             print(
                 "energy",
@@ -400,5 +414,5 @@ def rundmc(
 
     df_ret = {}
     for k in df[0].keys():
-        df_ret[k] = np.asarray([d[k] for d in df])
+        df_ret[k] = jnp.asarray([d[k] for d in df])
     return df_ret, configs, weights

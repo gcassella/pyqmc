@@ -6,8 +6,8 @@ def ecp(mol, configs, wf, threshold):
     """
     Returns the ECP value, summed over all the electrons and atoms.
     """
-    nconf, nelec = configs.configs.shape[0:2]
-    ecp_tot = np.zeros(nconf, dtype=complex if wf.iscomplex else float)
+    nconf, nelec = configs.shape[0:2]
+    ecp_tot = np.zeros(nconf, dtype=complex if wf["iscomplex"] else float)
     if mol._ecp != {}:
         for atom in mol._atom:
             if atom[0] in mol._ecp.keys():
@@ -20,13 +20,15 @@ def ecp_ea(mol, configs, wf, e, atom, threshold):
     """ 
     Returns the ECP value between electron e and atom at, local+nonlocal.
     """
-    nconf = configs.configs.shape[0]
-    ecp_val = np.zeros(nconf, dtype=complex if wf.iscomplex else float)
+    from pyqmc.distance import RawDistance
+
+    nconf = configs.shape[0]
+    ecp_val = np.zeros(nconf, dtype=complex if wf["iscomplex"] else float)
 
     at_name, apos = atom
     apos = np.asarray(apos)
 
-    r_ea_vec = configs.dist.dist_i(apos, configs.configs[:, e, :]).reshape((-1, 3))
+    r_ea_vec = RawDistance().dist_i(apos, configs[:, e, :]).reshape((-1, 3))
     r_ea = np.linalg.norm(r_ea_vec, axis=-1)
 
     l_list, v_l = get_v_l(mol, at_name, r_ea)
@@ -41,13 +43,13 @@ def ecp_ea(mol, configs, wf, e, atom, threshold):
 
     # Note: epos_rot is not just apos+r_ea_i because of the boundary;
     # positions of the samples are relative to the electron, not atom.
-    epos_rot = (configs.configs[mask, e, :] - r_ea_vec)[:, np.newaxis] + r_ea_i
+    epos_rot = (configs[mask, e, :] - r_ea_vec)[:, np.newaxis] + r_ea_i
 
     # Expand externally
     expanded_epos_rot = np.zeros((nconf, P_l.shape[1], 3))
     expanded_epos_rot[mask] = epos_rot
-    epos = configs.make_irreducible(e, expanded_epos_rot)
-    ratio = wf.testvalue(e, epos, mask)
+    epos = expanded_epos_rot
+    ratio = wf["testvalue"](configs, e, epos, mask)
 
     # Compute local and non-local parts
     ecp_val[mask] = np.einsum("ij,ik,ijk->i", ratio, masked_v_l, P_l)

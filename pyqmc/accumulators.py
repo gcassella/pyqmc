@@ -1,4 +1,5 @@
 import numpy as np
+import jax.numpy as jnp
 import pyqmc.energy as energy
 from pyqmc.ewald import Ewald
 
