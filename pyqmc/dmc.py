@@ -6,6 +6,7 @@ import h5py
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from functools import partial
 
@@ -263,10 +264,12 @@ def branch(key, configs, weights):
 def dmc_file(hdf_file, data, attr, configs, weights):
     import pyqmc.hdftools as hdftools
 
+    npdata = jax.tree_util.tree_map(np.asarray, data)
+
     if hdf_file is not None:
         with h5py.File(hdf_file, "a") as hdf:
             if "configs" not in hdf.keys():
-                hdftools.setup_hdf(hdf, data, attr)
+                hdftools.setup_hdf(hdf, npdata, attr)
                 hdf.create_dataset(
                   "configs",
                   configs.shape,
@@ -275,7 +278,7 @@ def dmc_file(hdf_file, data, attr, configs, weights):
                 )
             if "weights" not in hdf.keys():
                 hdf.create_dataset("weights", weights.shape)
-            hdftools.append_hdf(hdf, data)
+            hdftools.append_hdf(hdf, npdata)
             hdf["configs"].resize(configs.shape)
             hdf["configs"][...] = configs
             hdf["weights"][:] = weights

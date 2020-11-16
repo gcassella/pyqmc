@@ -5,7 +5,8 @@ import os
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
-#import numpy as np
+
+import numpy as np
 import jax.numpy as jnp
 import jax
 import h5py
@@ -93,17 +94,19 @@ def limdrift(g, cutoff=1):
 def vmc_file(hdf_file, data, attr, configs):
     import pyqmc.hdftools as hdftools
 
+    npdata = jax.tree_util.tree_map(np.asarray, data)
+
     if hdf_file is not None:
         with h5py.File(hdf_file, "a") as hdf:
             if "configs" not in hdf.keys():
-                hdftools.setup_hdf(hdf, data, attr)
+                hdftools.setup_hdf(hdf, npdata, attr)
                 hdf.create_dataset(
                     "configs",
                     configs.shape,
                     chunks=True,
                     maxshape=(None, *configs.shape[1:]),
                 )
-            hdftools.append_hdf(hdf, data)
+            hdftools.append_hdf(hdf, npdata)
             hdf["configs"].resize(configs.shape)
             hdf["configs"][...] = configs
 
