@@ -110,7 +110,7 @@ def vmc_file(hdf_file, data, attr, configs):
             hdf["configs"].resize(configs.shape)
             hdf["configs"][...] = configs
 
-@partial(jax.jit, static_argnums=(1,4,5,6,))
+#@partial(jax.jit, static_argnums=(1,4,5,6,))
 def vmc_step(key, wf, configs, block_avg, tstep, nsteps, accumulators):
     acc = 0.0
     nconf, nelec, _ = configs.shape

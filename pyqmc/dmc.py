@@ -49,7 +49,7 @@ def limdrift_cutoff(g, tau, cutoff=1):
     """
     return mc.limdrift(g, cutoff) * tau
 
-@partial(jax.jit, static_argnums=(1,9,10,11))
+#@partial(jax.jit, static_argnums=(1,9,10,11))
 def dmc_step(
     key,
     wf,

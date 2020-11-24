@@ -44,8 +44,7 @@ def get_ecp(mol, configs, wf, threshold):
 def kinetic(configs, wf):
     nconf, nelec, ndim = configs.shape
     ke = jnp.zeros(nconf)
-    for e in range(nelec):
-        ke += -0.5 * jnp.real(wf["laplacian"](configs, e, configs[:, e]))
+    ke += -0.5 * jnp.real(wf["laplacian"](configs))
     return ke
 
 
