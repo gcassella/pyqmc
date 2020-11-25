@@ -124,7 +124,7 @@ def dmc_step(
     avg["acceptance"] = jnp.mean(acc)
     df.append(avg)
 
-    return df, configs
+    return df, configs, weights
 
 def dmc_propagate(
     key,
@@ -173,7 +173,7 @@ def dmc_propagate(
     df = []
     for _ in range(nsteps):
         key, subkey = jax.random.split(key)
-        df, configs = dmc_step(
+        df, configs, weights = dmc_step(
             subkey,
             wf,
             configs,
